@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+outputs/
+fashion_clip_images/
+.DS_Store
+.venv/
+venv/
+*.zip
