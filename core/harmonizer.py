@@ -553,7 +553,8 @@ class OutfitHarmonizer:
                 "budget_note": budget_note,
                 "items": cand["items"],
                 "worn_accessories": worn,
-                "core_key": cand["core_key"]
+                "core_key": cand["core_key"],
+                "vec_score": cand["vec_score"]
             })
 
         passed_outfits = [o for o in evaluated_outfits if o["pass_status"]]
@@ -570,16 +571,18 @@ class OutfitHarmonizer:
 
         (상의+하의가 동일하고 모자 유무만 다른 코디가 나란히 추천되는 것을 방지)
 
-        점수가 동점일 때는 잡화를 더 갖춘 변형을 우선한다. 변형 생성 순서가
-        '잡화 없음'부터라서, 동점이면 안정 정렬 탓에 잡화 없는 쪽이 항상 이기는
-        문제가 있었다. 같은 점수라면 착장이 완성된 쪽이 더 나은 추천이다.
+        동점 처리 순서는 (1) 잡화를 더 갖춘 변형, (2) 벡터 조화도가 높은 변형이다.
+        변형 생성 순서가 '잡화 없음'부터라서 동점이면 안정 정렬 탓에 잡화 없는 쪽이
+        항상 이기는 문제가 있었고, VLM이 점수를 5의 배수로만 매겨 서로 다른 코어까지
+        동점이 되는 경우가 많다. 벡터 조화도는 연속값이라 그 동점을 갈라준다.
         """
         if is_fallback_budget:
             # 예산 차선책 모드에서는 가격이 최우선이므로 잡화 가점을 적용하지 않는다.
             outfits.sort(key=lambda x: (x["total_price"], -x["harmony_score"]))
         else:
             outfits.sort(key=lambda x: (-x["harmony_score"],
-                                        -len(x.get("worn_accessories") or [])))
+                                        -len(x.get("worn_accessories") or []),
+                                        -x.get("vec_score", 0.0)))
 
         chosen, used_cores = [], set()
         for outfit in outfits:
