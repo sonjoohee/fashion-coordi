@@ -7,20 +7,6 @@ from qdrant_client.http import models
 
 # 2단계: Fashion-CLIP + Qdrant 탐색기
 
-# --- 계절별 배제 서브카테고리 -------------------------------------------------
-# payload에 season 필드가 존재하지 않는다(388건 전수 확인). 그래서 계절 적합성은
-# 모든 상품에 채워져 있는 subcategory로 판정한다.
-#
-# '포함 목록'이 아니라 '배제 목록'을 쓴다. 포함 목록으로 좁히면 사계절 아이템
-# (long_sleeve_tshirt, denim_pants, baseball_cap, fashion_sneakers 등)이 후보에서
-# 통째로 사라져 추천할 상품이 남지 않는다.
-SUMMER_ONLY_SUBCATEGORIES = [
-    "short_sleeve_tshirt", "shorts", "slides", "clogs", "bucket_hat",
-]
-WINTER_ONLY_SUBCATEGORIES = [
-    "heavy_puffer", "lightweight_puffer", "fleece", "beanie",
-    "knit_sweater", "leather_jacket", "hiking_shoes",
-]
 
 class FashionSearchEngine:
     def __init__(self, qdrant_url="http://localhost:6333", collection_name="musinsa_products"):
@@ -64,7 +50,7 @@ class FashionSearchEngine:
                query_image_path: str = None,
                category: str = None,
                color: str = None,
-               season: str = None,       # 'SS' 또는 'FW' (subcategory 배제 방식으로 적용)
+               season: str = None,       # 'SS' 또는 'FW' (사계절 'ALL' 상품은 항상 포함)
                max_price: int = None,
                top_k: int = 5) -> list:
 
@@ -83,25 +69,14 @@ class FashionSearchEngine:
         if max_price is not None:
             must_conditions.append(models.FieldCondition(key="price", range=models.Range(lte=max_price)))
 
-        # 🎯 계절 필터: season 필드가 없으므로 subcategory 배제로 처리한다.
-        # (기존의 key="season" MatchValue는 항상 0건이라 계절 필터가 무의미했고,
-        #  그 탓에 coordinator의 Fallback이 매번 발동해 color 필터까지 버려졌다)
-        must_not_conditions = []
-        if season == "FW":
-            must_not_conditions.append(
-                models.FieldCondition(key="subcategory", match=models.MatchAny(any=SUMMER_ONLY_SUBCATEGORIES))
-            )
-        elif season == "SS":
-            must_not_conditions.append(
-                models.FieldCondition(key="subcategory", match=models.MatchAny(any=WINTER_ONLY_SUBCATEGORIES))
+        # 🎯 계절 필터: 요청 계절과 사계절('ALL') 상품을 함께 허용한다.
+        # MatchValue(season)만 쓰면 사계절 상품이 전부 배제되어 후보가 말라버린다.
+        if season:
+            must_conditions.append(
+                models.FieldCondition(key="season", match=models.MatchAny(any=[season, "ALL"]))
             )
 
-        query_filter = None
-        if must_conditions or must_not_conditions:
-            query_filter = models.Filter(
-                must=must_conditions or None,
-                must_not=must_not_conditions or None
-            )
+        query_filter = models.Filter(must=must_conditions) if must_conditions else None
 
         response = self.client.query_points(
             collection_name=self.collection_name,
@@ -120,6 +95,7 @@ class FashionSearchEngine:
                 "brand_name": p.get("brand_name"),
                 "category": p.get("category"),
                 "subcategory": p.get("subcategory"),
+                "season": p.get("season"),
                 "price": p.get("price"),
                 "colors": p.get("color_normalized"),
                 "local_image_path": p.get("local_image_path"),
