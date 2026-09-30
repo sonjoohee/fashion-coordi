@@ -31,24 +31,40 @@ SLOT_ALIASES = {"hat": "headwear"}          # 동일 부위 다른 명칭 통합
 ITEM_ID_KEYS = ("product_id", "id", "goods_no")
 
 class OutfitEvaluation(BaseModel):
-    """Vision LLM 정밀 심사 결과 스키마.
+    """Vision LLM 심사 결과 스키마.
 
-    주의: Structured Outputs strict 모드는 숫자 범위 제약(ge/le)을 지원하지 않는다.
-    harmony_score 범위는 프롬프트로 유도하고 최종 클램프는 코드에서 수행한다.
+    VLM에게 '통과/탈락'이라는 종합 판정을 맡기지 않는다. 항목별 점수와 충돌 여부만
+    받고, 종합 점수와 pass_status는 코드가 계산한다. VLM이 직접 harmony_score를
+    매기게 했을 때 85점과 45점 두 값으로만 몰려 정렬이 무의미해졌기 때문이다.
+
+    주의: Structured Outputs strict 모드는 숫자 범위 제약(ge/le)을 지원하지 않으므로
+    범위는 프롬프트로 유도하고 클램프는 코드에서 수행한다.
     """
-    pass_status: bool = Field(
-        description="규칙 위반 여부 판정 (위반 사항이 없거나 무난히 어울리면 True, 심각한 부적합 시 False)"
+    color_score: float = Field(
+        description="색상·톤 조화 점수 (0~100). 무채색 기반이나 톤이 이어지면 높고, 원색이 충돌하면 낮음"
     )
-    harmony_score: float = Field(
-        description="코디 종합 조화도 점수 (0~100). 통과 시 60~100, 탈락 시 50 이하"
+    fit_score: float = Field(
+        description="실루엣·핏 균형 점수 (0~100). 상하의 볼륨 대비가 자연스러우면 높음"
     )
-    violated_rules: List[Literal["season", "color", "tpo", "fit", "formality"]] = Field(
-        default_factory=list,
-        description="위반된 규칙 목록 (season, color, tpo, fit, formality 중 해당 항목)"
+    mood_score: float = Field(
+        description="무드 통일감 및 착용 목적 부합 점수 (0~100). 한 착장으로 읽히면 높음"
+    )
+    season_conflict: bool = Field(
+        description="상·하의 두께감이 서로 명백히 충돌하는지 (예: 반팔 + 기모 바지). 개별 아이템의 계절 적합성은 판정 대상이 아님"
+    )
+    formality_conflict: bool = Field(
+        description="격식 자리(결혼식/장례식/면접/비즈니스)에 모자나 샌들이 포함되었는지"
     )
     feedback_summary: str = Field(
-        description="판정 근거를 한 문장으로 요약 (아이템 간 조화, 색상/톤 충돌, TPO 중심)"
+        description="판정 근거를 한 문장으로 요약. 근거가 된 아이템의 상품명을 반드시 포함"
     )
+
+
+# --- 종합 점수 산출 규칙 -------------------------------------------------------
+# 색상을 가장 크게 본다. 실제 코디 품질에서 톤 충돌이 가장 눈에 띄기 때문이다.
+SCORE_WEIGHTS = {"color": 0.5, "fit": 0.25, "mood": 0.25}
+PASS_SCORE_THRESHOLD = 60.0   # 이 점수 미만이면 착용 가능 수준이 아니라고 본다
+LOW_ITEM_SCORE = 40.0         # 항목 점수가 이 값 미만이면 해당 규칙 위반으로 기록
 
 # 구버전 이름으로 import하는 모듈 호환용 별칭
 OutfitRuleVerification = OutfitEvaluation
@@ -283,15 +299,8 @@ class OutfitHarmonizer:
    - 착용 목적({tpo_label})과 계절감에 부합하는지 확인하세요.
    - [격식 자리인 경우에만 적용] 착용 목적이 결혼식, 장례식, 면접, 비즈니스처럼 격식을 요구하는 자리라면 모자(볼캡/버킷햇/비니)나 샌들이 포함되는 즉시 탈락('formality', 'tpo')입니다.
    - [격식 자리가 아닌 경우] 착용 목적이 여행, 데일리, 캠퍼스, 휴양지, 운동처럼 캐주얼하다면 모자와 샌들은 정상적인 코디 아이템입니다. 이때 모자나 샌들이 포함된 것만을 근거로 'formality' 위반을 판정하는 것을 금지합니다.
-   - [한여름·휴양지 목적에만 적용] 울, 기모, 가죽, 두꺼운 니트, 패딩, 플리스가 포함되면 탈락('season')입니다.
-   - [한겨울·방한 목적에만 적용] 샌들, 슬리퍼, 슬라이드, 뮬, 쪼리, 반팔, 반바지, 여름용 햇(버킷햇/썬햇)이 포함되면 탈락('season')입니다.
-   - [간절기 목적에는 위 두 규칙을 적용하지 마세요] 착용 목적이 봄, 가을, 환절기, 간절기라면 긴팔, 얇은 니트, 린넨 혼방, 스니커즈, 볼캡, 얇은 자켓은 모두 정상 아이템입니다.
-   - 착용 목적에 계절이나 월이 명시되지 않았다면 계절을 임의로 가정하지 마세요. 이 경우 'season' 위반은 상·하의 간 두께감이 서로 명백히 충돌할 때만(예: 반팔 + 기모 바지) 판정합니다.
-   - 계절 판정의 1차 근거는 각 아이템 대괄호 안의 세부 품목(슬래시 뒤 값)입니다. 이미지나 상품명으로 추측하지 말고 이 값을 먼저 확인하세요.
-     * 여름 전용: short_sleeve_tshirt, shorts, slides, clogs, bucket_hat
-     * 겨울 전용: heavy_puffer, lightweight_puffer, fleece, beanie, knit_sweater, leather_jacket, hiking_shoes
-     * 사계절(계절 위반으로 판정 금지): long_sleeve_tshirt, shirt, cotton_pants, denim_pants, jogger_pants, slacks, baseball_cap, fashion_sneakers, running_shoes, loafers, derby_shoes, canvas_shoes, hoodie, sweatshirt, blazer, cardigan
-   - 세부 품목이 비어 있을 때만 상품명으로 보조 판단하세요. ('슬라이드', '뮬', '샌들'은 여름 신발 / '이어플랩', '플리스 캡'은 겨울 모자)
+   - ★ 개별 아이템의 계절 적합성은 이미 검색 단계에서 보장되었습니다. 목록에 있는 아이템은 모두 이 계절에 착용 가능한 것으로 확정된 상태입니다. "이 아이템은 여름용/겨울용이라 부적합하다"는 식의 판정을 하지 마세요.
+   - season_conflict는 상·하의의 두께감이 서로 명백히 충돌할 때만 true입니다. (예: 반팔 티셔츠 + 기모 바지) 그 외에는 false로 두세요.
 
 2. 색상 및 톤 조화 ('color') — [★ 핵심 심사 항목]
    - 눈이 피로한 극단적 원색 충돌(예: 빨강+초록 신호등룩)이나 채도가 완전히 어긋나 겉도는 조합만 탈락(pass_status: false, violated_rules: ['color'])시키고, 그 외의 자연스러운 컬러 조합은 폭넓게 허용하세요.
@@ -304,17 +313,20 @@ class OutfitHarmonizer:
 4. 격식도 및 무드 통일감 ('formality')
    - 아이템들의 분위기가 한 착장 안에서 심각하게 겉돌지 않는지 확인하세요.
 
-[점수 및 최종 판정 지침]
-- harmony_score 채점 기준:
-  * 모든 기준을 만족하고 조화로운 경우: 80점 ~ 100점 부여
-  * 사소한 아쉬움이 있으나 착용 가능한 수준인 경우: 60점 ~ 79점 부여
-  * 규칙 위반으로 탈락(pass_status: false)인 경우: 절대 고득점을 주지 말고 50점 이하로 감점 처리하세요.
-- 위 2번 색상 규칙 위반 시 '개성 있는 연출이라 조화롭다'는 식의 자의적 판정을 금지하며, 반드시 pass_status: false 및 violated_rules: ['color']로 처리하세요.
-- 판정을 시작하기 전에 [아이템 목록]의 상품명을 하나씩 훑어 계절 신호를 확인하세요. 착용 목적의 계절과 충돌하는 아이템이 단 하나라도 있으면 다른 항목이 아무리 좋아도 반드시 pass_status: false 및 violated_rules에 'season'을 포함하세요. 같은 아이템을 어떤 조합에서는 통과시키고 다른 조합에서는 탈락시키는 비일관 판정을 금지합니다.
-- [아이템 목록]에 실제로 있는 아이템만 근거로 삼으세요. 목록에 없는 카테고리(예: 목록에 모자가 없는데 모자를 언급)를 판정 사유로 쓰거나 그것을 이유로 탈락시키는 것을 금지합니다. 판정 전에 목록의 카테고리를 먼저 확인하세요.
-- violated_rules에는 실제로 확인한 위반만 담으세요. 확신이 없는 규칙을 관성적으로 함께 나열하지 마세요.
-- harmony_score는 조합마다 다르게 매기세요. 여러 조합에 똑같은 점수(예: 전부 85점)를 반복하지 말고, 조합 간 우열이 드러나도록 1점 단위로 차이를 두세요.
-- feedback_summary에는 구체적인 판정 사유(예: "자연스러운 톤 매치로 조화로움" 또는 "채도가 어긋나 겉도는 조합")를 1문장으로 명확히 작성하세요.
+[채점 지침]
+당신은 통과/탈락을 판정하지 않습니다. 아래 세 항목에 각각 0~100점을 매기고 충돌 여부만 표시하세요.
+종합 점수와 최종 통과 여부는 시스템이 계산합니다.
+
+- color_score / fit_score / mood_score 채점 기준:
+  * 90~100 : 흠잡을 데 없이 잘 어우러짐
+  * 70~89  : 자연스럽고 무난함
+  * 50~69  : 아쉬운 점이 있으나 착용 가능
+  * 30~49  : 눈에 거슬림
+  * 0~29   : 심각하게 어긋남
+- 세 점수를 모두 같은 값으로 매기지 마세요. 항목마다 실제 평가가 다르므로 점수도 달라야 합니다.
+- 조합마다 다른 점수를 매기세요. 여러 조합에 똑같은 숫자(예: 전부 85점)를 반복하면 순위를 가릴 수 없습니다. 1점 단위로 차이를 두세요.
+- [아이템 목록]에 실제로 있는 아이템만 근거로 삼으세요. 목록에 없는 카테고리(예: 목록에 모자가 없는데 모자를 언급)를 판정 사유로 쓰는 것을 금지합니다.
+- feedback_summary에는 점수의 근거를 1문장으로 쓰고, 근거가 된 아이템의 상품명을 반드시 포함하세요. (예: "'피치드 레글런 롱슬리브'의 오트밀 톤이 데님과 부드럽게 이어짐")
 
 [아이템 목록]
 {item_list_text}"""
@@ -335,17 +347,39 @@ class OutfitHarmonizer:
             if parsed is None:
                 raise ValueError("VLM 응답 파싱 결과가 비어 있음 (refusal 또는 스키마 불일치)")
 
-            # 🛡️ [점수 왜곡 방지 가드레일 — 단일 지점]
-            # VLM이 탈락(False)을 주고도 90점대를 주는 경우를 코드로 강제 제어
-            score = float(np.clip(parsed.harmony_score, 0.0, 100.0))
-            if not parsed.pass_status:
+            # 항목 점수는 VLM이, 종합 판정은 코드가 한다.
+            # (VLM에게 harmony_score와 pass_status를 직접 맡겼을 때
+            #  85점/45점 두 값으로만 몰려 정렬이 무의미해졌다)
+            color = float(np.clip(parsed.color_score, 0.0, 100.0))
+            fit = float(np.clip(parsed.fit_score, 0.0, 100.0))
+            mood = float(np.clip(parsed.mood_score, 0.0, 100.0))
+
+            score = (color * SCORE_WEIGHTS["color"]
+                     + fit * SCORE_WEIGHTS["fit"]
+                     + mood * SCORE_WEIGHTS["mood"])
+
+            # 위반 목록과 통과 여부가 모순되지 않게, 위반이 하나라도 있으면 탈락시킨다.
+            # (통과인데 '위반 규칙을 고려하세요'라는 안내가 붙는 상황을 막는다)
+            violated_rules = []
+            if parsed.season_conflict:
+                violated_rules.append("season")
+            if parsed.formality_conflict:
+                violated_rules.append("formality")
+            if color < LOW_ITEM_SCORE:
+                violated_rules.append("color")
+            if fit < LOW_ITEM_SCORE:
+                violated_rules.append("fit")
+
+            pass_status = (not violated_rules) and score >= PASS_SCORE_THRESHOLD
+            if not pass_status:
                 score = min(score, FAIL_SCORE_CAP)
 
             return {
                 "harmony_score": round(score, 1),
-                "pass_status": parsed.pass_status,
-                "violated_rules": parsed.violated_rules,
+                "pass_status": pass_status,
+                "violated_rules": violated_rules,
                 "feedback_summary": parsed.feedback_summary,
+                "item_scores": {"color": round(color, 1), "fit": round(fit, 1), "mood": round(mood, 1)},
                 "evaluated_by": "vision_llm"
             }
         except Exception as exc:
@@ -357,6 +391,7 @@ class OutfitHarmonizer:
                 "pass_status": True,
                 "violated_rules": [],
                 "feedback_summary": "(자동 심사 불가) 시각 벡터 유사도 기준 잠정 조화 판정",
+                "item_scores": None,
                 "evaluated_by": "vector_fallback"
             }
 
@@ -487,16 +522,23 @@ class OutfitHarmonizer:
             worn = cand.get("worn_accessories") or []
             worn_label = f"잡화: {'+'.join(worn)}" if worn else "잡화 없음"
             status_badge = "✓ 통과" if eval_res["pass_status"] else f"✗ 탈락({eval_res['violated_rules']})"
+            scores = eval_res.get("item_scores")
+            score_detail = (f" (색{scores['color']}/핏{scores['fit']}/무드{scores['mood']})"
+                            if scores else "")
             print(f"   [{idx}번 변형] ({' + '.join(item_types)} | {worn_label} | {cand['total_price']:,}원) "
-                  f"{status_badge} | {eval_res['harmony_score']}점 | {eval_res['feedback_summary']}")
+                  f"{status_badge} | {eval_res['harmony_score']}점{score_detail} | {eval_res['feedback_summary']}")
 
             status_text = "[규칙 통과]" if eval_res["pass_status"] else "[규칙 위반]"
             verdict_text = f"{status_text} {eval_res['feedback_summary']}"
 
-            if eval_res["violated_rules"]:
+            # 팁 분기는 pass_status를 기준으로 한다. 점수 미달로 탈락했으나 특정 위반 항목이
+            # 없는 경우(violated_rules가 빈 배열)에 칭찬 문구가 붙는 것을 막는다.
+            if eval_res["pass_status"]:
+                styling_tip_text = "TPO와 계절감, 실루엣이 균형 있게 어우러진 추천 코디입니다."
+            elif eval_res["violated_rules"]:
                 styling_tip_text = f"위반 규칙({', '.join(eval_res['violated_rules'])})을 고려하여 아이템을 재선택해 보세요."
             else:
-                styling_tip_text = "TPO와 계절감, 실루엣이 균형 있게 어우러진 추천 코디입니다."
+                styling_tip_text = "종합 조화도가 기준에 미달했습니다. 색상 톤이나 실루엣을 조정해 보세요."
 
             evaluated_outfits.append({
                 "pass_status": eval_res["pass_status"],
