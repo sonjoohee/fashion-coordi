@@ -18,15 +18,22 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 FAIL_SCORE_CAP = 45.0       # 규칙 위반 세트의 점수 상한
 NEUTRAL_COLORS = {"black", "white", "gray", "grey", "charcoal", "ivory"}
 
-# 신발·모자는 모두 선택품(optional)이다.
 # 카테고리가 다른 아이템 간 CLIP 유사도는 구조적으로 낮게 나와 절대 임계값으로는
-# '어울림'과 '안 어울림'을 가를 수 없다. 그래서 잡화 착용 여부를 벡터 점수로 자르지 않고,
+# '어울림'과 '안 어울림'을 가를 수 없다. 그래서 모자 착용 여부를 벡터 점수로 자르지 않고,
 # 착용 조합별 변형(variant)을 만들어 명시적 규칙을 가진 VLM이 판단하게 한다.
-ACCESSORY_VARIANT_CORES = 2   # 잡화 변형을 생성할 상위 코어 조합 수
+ACCESSORY_VARIANT_CORES = 2   # 모자 착용 변형을 생성할 상위 코어 조합 수
 MAX_VLM_EVALS = 10            # VLM 호출 수 상한 (비용 통제)
 
 CORE_ORDER = ("outer", "top", "bottom")     # 코어 의류 (조합 뼈대)
-ACC_ORDER = ("shoes", "headwear")           # 잡화 (모두 선택품)
+ACC_ORDER = ("shoes", "headwear")           # 코어 뒤에 붙는 슬롯
+
+# 신발은 필수 착장이다. 후보가 있으면 모든 변형에 반드시 포함한다.
+# (코어에 넣지 않는 이유: 코어에 넣으면 코어 식별키에 신발이 섞여, 최종 추천 2개가
+#  옷은 똑같고 신발만 다른 세트로 채워질 수 있다. 옷 조합의 다양성을 지키려면
+#  신발은 코어 뒤에 붙이되 선택권만 없애는 쪽이 맞다.)
+MANDATORY_ACC_SLOTS = ("shoes",)
+# 모자는 선택품이다. 야외 상황에서만 후보로 올라오고(coordinator가 판단),
+# 룩에 어울리는지는 착용/미착용 변형을 비교해 VLM이 결정한다.
 SLOT_ALIASES = {"hat": "headwear"}          # 동일 부위 다른 명칭 통합
 ITEM_ID_KEYS = ("product_id", "id", "goods_no")
 
@@ -440,8 +447,8 @@ class OutfitHarmonizer:
         """
         [계층적 코디 선별 로직]
         1단계: 코어 의류(상의 + 하의 [+ 아우터])를 우선 조합하여 뼈대 구축 및 1차 검증
-        2단계: 신발·모자는 모두 선택품이므로 착용 조합별 변형을 생성
-               (잡화 없음 / 신발만 / 모자만 / 둘 다) — 착용 여부 판단을 VLM에 위임
+        2단계: 신발은 필수이므로 모든 변형에 고정 포함하고, 모자만 착용/미착용 변형을
+               만들어 어울리는지 판단을 VLM에 위임
         3단계: 변형들을 Vision LLM으로 심사한 뒤, 같은 코어에서 파생된 변형은 최고점만 남김
         """
         # 0. 입력 정규화: None 센티넬 제거, hat/headwear 통합, 빈 슬롯 정리
@@ -507,35 +514,57 @@ class OutfitHarmonizer:
 
         top_core_candidates = candidate_pool[:min(len(candidate_pool), top_k * 3)]
 
-        # 3. [2단계] 잡화 착용 조합별 변형 생성 (신발·모자 모두 선택품)
+        # 3. [2단계] 변형 생성 — 신발은 전 변형에 고정, 모자만 착용/미착용으로 전개
+        mandatory_slots = [s for s in acc_slots if s in MANDATORY_ACC_SLOTS]
+        optional_slots = [s for s in acc_slots if s not in MANDATORY_ACC_SLOTS]
+
         eval_pool = []
         for rank, cand in enumerate(top_core_candidates):
             core_key = self._core_key(cand["items"])
 
-            # 슬롯별로 벡터 조화도가 가장 높은 잡화 1개씩만 대표로 뽑는다.
-            # (임계값으로 자르지 않는다 — 착용 여부는 아래 변형 심사에서 VLM이 결정)
+            # 슬롯별로 벡터 조화도가 가장 높은 후보 1개씩만 대표로 뽑는다.
+            # (임계값으로 자르지 않는다 — 모자 착용 여부는 아래 변형 심사에서 VLM이 결정)
+
+            # 신발: 필수이므로 모든 코어에 대해 뽑고 고정으로 붙인다.
+            fixed = []
+            fixed_price = 0
+            for acc_slot in mandatory_slots:
+                item, score = self._pick_best_accessory(
+                    cand["items"], slots[acc_slot], cand["total_price"] + fixed_price,
+                    total_budget, is_fallback_budget
+                )
+                if item:
+                    fixed.append((acc_slot, item))
+                    fixed_price += self._item_price(item)
+                    print(f"   ↳ [{acc_slot} 필수] {item.get('product_name', '')} (벡터 {score}점)")
+                else:
+                    # 후보가 없거나 예산에 걸리면 신발 없이 진행한다 (없으면 어쩔 수 없다).
+                    print(f"   ↳ [{acc_slot} 필수] 조건에 맞는 후보가 없어 신발 없이 구성합니다.")
+
+            # 모자: 선택품이라 상위 코어에서만 후보를 뽑아 착용/미착용을 비교한다.
             picks = []
             if rank < ACCESSORY_VARIANT_CORES:
-                for acc_slot in acc_slots:
+                for acc_slot in optional_slots:
                     item, score = self._pick_best_accessory(
-                        cand["items"], slots[acc_slot], cand["total_price"],
+                        cand["items"], slots[acc_slot], cand["total_price"] + fixed_price,
                         total_budget, is_fallback_budget
                     )
                     if item:
                         picks.append((acc_slot, item))
-                        print(f"   ↳ [{acc_slot} 후보] {item.get('product_name', '')} (벡터 {score}점)")
+                        print(f"   ↳ [{acc_slot} 선택] {item.get('product_name', '')} (벡터 {score}점)")
 
-            # 부분집합 전개: 잡화 없음 → 한 종류만 → 전부
+            # 부분집합 전개: 모자 없음 → 모자 착용
             for size in range(len(picks) + 1):
                 for subset in combinations(picks, size):
-                    variant_items = list(cand["items"]) + [item for _, item in subset]
+                    worn_pairs = fixed + list(subset)
+                    variant_items = list(cand["items"]) + [item for _, item in worn_pairs]
                     variant_price = cand["total_price"] + sum(
-                        self._item_price(item) for _, item in subset
+                        self._item_price(item) for _, item in worn_pairs
                     )
                     if total_budget and not is_fallback_budget and variant_price > total_budget:
                         continue
 
-                    worn = [slot for slot, _ in subset]
+                    worn = [slot for slot, _ in worn_pairs]
                     eval_pool.append({
                         "items": variant_items,
                         "total_price": variant_price,
