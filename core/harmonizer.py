@@ -2,7 +2,7 @@ import os
 import base64
 import numpy as np
 from itertools import combinations, product
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -141,16 +141,20 @@ class OutfitHarmonizer:
         절대 임계값으로 탈락시키지 않는다. 아이템 수가 늘면 카테고리가 다른 쌍이
         평균을 끌어내려 어울리는 잡화도 점수가 떨어지기 때문에, 이 점수는
         '같은 슬롯 후보 간 상대 비교'에만 쓰고 착용 여부는 VLM이 판단한다.
+
+        비교에는 상한이 없는 연속 점수(mix)를 쓴다. 표시용 점수로 비교하면 후보 여러 개가
+        99.0에 함께 닿아 사실상 첫 번째 후보가 그냥 뽑히는 일이 생긴다.
+        돌려주는 값은 로그 가독성을 위해 표시용 점수다.
         """
-        best_item, best_score = None, -1.0
+        best_item, best_display, best_mix = None, 70.0, -1e9
         for candidate in candidates:
             price = self._item_price(candidate)
             if total_budget and not is_fallback_budget and (current_price + price > total_budget):
                 continue
-            score = self.calculate_vector_harmony(base_items + [candidate])
-            if score > best_score:
-                best_score, best_item = score, candidate
-        return best_item, best_score
+            display_score, mix_score = self.vector_harmony_parts(base_items + [candidate])
+            if mix_score > best_mix:
+                best_mix, best_display, best_item = mix_score, display_score, candidate
+        return best_item, best_display
 
     def _normalize_slot_candidates(self, slot_candidates: Optional[dict]) -> dict:
         """슬롯 키 별칭 통합(hat→headwear) + 값 정규화 + 슬롯 내 중복 아이템 제거"""
@@ -226,13 +230,23 @@ class OutfitHarmonizer:
             colors.extend(str(color).strip().lower() for color in raw if color)
         return colors
 
-    def calculate_vector_harmony(self, items: list) -> float:
-        """Fashion-CLIP 시각 벡터 유사도 + 색상 안정성 가산점 + 아이템 완성도 보정"""
+    def vector_harmony_parts(self, items: list) -> Tuple[float, float]:
+        """벡터 조화도를 (표시용 점수, 정렬·혼합용 연속 점수) 두 가지로 돌려준다.
+
+        표시용 점수는 50~99 범위로 잘라 사람이 읽기 쉽게 만든 값이다.
+        그런데 보너스(무채색 +10, 아이템 수 +8~12)가 더해지면 상한 99에 여러 조합이
+        동시에 닿아버려 순위를 전혀 가리지 못한다. 실제로 겨울 질의에서 후보 8개의
+        벡터 점수가 모두 99.0으로 붙었고, 그 결과 최종 조화도까지 83.9점으로 똑같아졌다.
+
+        그래서 상·하한을 적용하지 않은 연속 점수를 따로 계산해 정렬과 점수 혼합에 쓴다.
+        보너스 체계와 척도는 그대로 두었으므로 점수 수준은 기존과 거의 같고,
+        상한에 눌려 사라졌던 조합 간 미세한 차이만 되살아난다.
+        """
         valid_items = [it for it in items if it]
         vectors = [vec for vec in (self._get_vector(it) for it in valid_items) if vec is not None]
 
         if len(vectors) < 2:
-            return 70.0
+            return 70.0, 70.0
 
         sims = []
         for i in range(len(vectors)):
@@ -240,7 +254,8 @@ class OutfitHarmonizer:
                 sims.append(float(np.dot(vectors[i], vectors[j])))
 
         avg_sim = float(np.mean(sims))
-        visual_score = np.clip((avg_sim - 0.15) / (0.60 - 0.15) * 100, 40, 95)
+        visual_raw = (avg_sim - 0.15) / (0.60 - 0.15) * 100
+        visual_score = np.clip(visual_raw, 40, 95)
 
         # 1. 무채색 안정성 보너스
         color_bonus = 0
@@ -257,7 +272,13 @@ class OutfitHarmonizer:
         elif len(valid_items) >= 4:    # 풀 착장 (상의 + 하의 + 신발 + 모자)
             item_count_bonus = 12.0
 
-        return round(float(np.clip(visual_score + color_bonus + item_count_bonus, 50.0, 99.0)), 1)
+        display_score = round(float(np.clip(visual_score + color_bonus + item_count_bonus, 50.0, 99.0)), 1)
+        mix_score = round(float(visual_raw + color_bonus + item_count_bonus), 2)
+        return display_score, mix_score
+
+    def calculate_vector_harmony(self, items: list) -> float:
+        """표시용 벡터 조화도(50~99)만 필요한 호출부를 위한 래퍼"""
+        return self.vector_harmony_parts(items)[0]
 
     # ------------------------------------------------------------------
     # Vision LLM 정밀 심사
@@ -446,9 +467,11 @@ class OutfitHarmonizer:
             if not items:
                 continue
 
+            display_score, mix_score = self.vector_harmony_parts(items)
             ranked_core.append({
                 "items": items,
-                "vec_score": self.calculate_vector_harmony(items),
+                "vec_score": display_score,
+                "vec_mix": mix_score,
                 "total_price": sum(self._item_price(it) for it in items)
             })
 
@@ -466,7 +489,7 @@ class OutfitHarmonizer:
                 print(f"💰 [예산 준수] 코어 의류 {len(in_budget_combos)}개 조합이 {total_budget:,}원 이하 기준을 만족합니다.")
             else:
                 is_fallback_budget = True
-                ranked_core.sort(key=lambda x: (x["total_price"], -x["vec_score"]))
+                ranked_core.sort(key=lambda x: (x["total_price"], -x["vec_mix"]))
                 min_price = ranked_core[0]["total_price"]
                 candidate_pool = ranked_core[:15]
                 budget_note = f"요청하신 예산({total_budget:,}원 이하)에 딱 맞는 조합이 없어, 가장 근접한 최저가({min_price:,}원~) 세트를 추천합니다."
@@ -475,10 +498,12 @@ class OutfitHarmonizer:
             candidate_pool = ranked_core
 
         # 코어 조합 상위 후보 선별
+        # 정렬 기준은 상한이 없는 vec_mix다. vec_score로 정렬하면 상위 코어가 모두 99.0에
+        # 묶여 사실상 조합 생성 순서대로 뽑히게 되고, 좋은 코어가 상위 후보에서 밀려난다.
         if is_fallback_budget:
-            candidate_pool.sort(key=lambda x: (x["total_price"], -x["vec_score"]))
+            candidate_pool.sort(key=lambda x: (x["total_price"], -x["vec_mix"]))
         else:
-            candidate_pool.sort(key=lambda x: x["vec_score"], reverse=True)
+            candidate_pool.sort(key=lambda x: x["vec_mix"], reverse=True)
 
         top_core_candidates = candidate_pool[:min(len(candidate_pool), top_k * 3)]
 
@@ -515,6 +540,7 @@ class OutfitHarmonizer:
                         "items": variant_items,
                         "total_price": variant_price,
                         "vec_score": cand["vec_score"],
+                        "vec_mix": cand["vec_mix"],
                         "core_key": core_key,
                         "worn_accessories": worn
                     })
@@ -533,11 +559,14 @@ class OutfitHarmonizer:
 
             # VLM 점수에 벡터 조화도를 섞어 동점을 해소한다.
             # 탈락 세트는 상한(FAIL_SCORE_CAP)을 유지해야 하므로 통과 세트만 혼합한다.
+            # 혼합에는 표시용(50~99)이 아니라 상한 없는 vec_mix를 쓴다. 표시용 점수는
+            # 상한에 눌려 후보 전체가 99.0으로 같아지는 일이 잦아 동점을 못 갈랐다.
             vlm_score = eval_res["harmony_score"]
             if eval_res["pass_status"]:
-                blended = VLM_WEIGHT * vlm_score + VECTOR_WEIGHT * cand["vec_score"]
-                # 통과인데 표시 점수가 통과 기준 아래로 내려가는 모순을 막는다.
-                final_score = round(max(blended, PASS_SCORE_THRESHOLD), 1)
+                blended = VLM_WEIGHT * vlm_score + VECTOR_WEIGHT * cand["vec_mix"]
+                # 통과인데 표시 점수가 통과 기준 아래로 내려가는 모순을 막고,
+                # vec_mix가 100을 넘을 수 있으므로 최종 점수는 100으로 묶는다.
+                final_score = round(min(max(blended, PASS_SCORE_THRESHOLD), 100.0), 1)
             else:
                 final_score = vlm_score
 
@@ -550,7 +579,7 @@ class OutfitHarmonizer:
                             if scores else "")
             print(f"   [{idx}번 변형] ({' + '.join(item_types)} | {worn_label} | {cand['total_price']:,}원) "
                   f"{status_badge} | {final_score}점{score_detail} "
-                  f"[VLM {vlm_score} / 벡터 {cand['vec_score']}] | {eval_res['feedback_summary']}")
+                  f"[VLM {vlm_score} / 벡터 {cand['vec_score']} (혼합값 {cand['vec_mix']})] | {eval_res['feedback_summary']}")
 
             status_text = "[규칙 통과]" if eval_res["pass_status"] else "[규칙 위반]"
             verdict_text = f"{status_text} {eval_res['feedback_summary']}"
@@ -580,7 +609,8 @@ class OutfitHarmonizer:
                 "items": cand["items"],
                 "worn_accessories": worn,
                 "core_key": cand["core_key"],
-                "vec_score": cand["vec_score"]
+                "vec_score": cand["vec_score"],
+                "vec_mix": cand["vec_mix"]
             })
 
         passed_outfits = [o for o in evaluated_outfits if o["pass_status"]]
@@ -608,7 +638,7 @@ class OutfitHarmonizer:
         else:
             outfits.sort(key=lambda x: (-x["harmony_score"],
                                         -len(x.get("worn_accessories") or []),
-                                        -x.get("vec_score", 0.0)))
+                                        -x.get("vec_mix", 0.0)))
 
         chosen, used_cores = [], set()
         for outfit in outfits:
