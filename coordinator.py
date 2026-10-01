@@ -249,7 +249,8 @@ class FashionPipelineCoordinator:
                 slot_candidates=slot_candidates,
                 tpo_context=intent.tpo_summary,
                 total_budget=intent.total_budget,
-                top_k=2
+                top_k=2,
+                is_formal=is_formal
             )
 
             # [4단계] 자연어 응답 생성

@@ -60,9 +60,9 @@ class OutfitEvaluation(BaseModel):
         description="상·하의 두께감이 서로 명백히 충돌하는지 (예: 반팔 + 기모 바지). 개별 아이템의 계절 적합성은 판정 대상이 아님"
     )
     formality_conflict: bool = Field(
-        description="격식 자리에 모자(볼캡/버킷햇/비니) 또는 샌들/슬리퍼/슬라이드가 포함된 경우에만 true. "
-                    "'격식이 부족해 보인다'는 주관적 판단으로는 절대 true로 하지 말 것. "
-                    "해당 품목이 목록에 없으면 무조건 false"
+        description="유저 프롬프트의 격식 지침에 정확히 해당할 때만 true. "
+                    "프롬프트가 '격식 수준은 심사 항목이 아니다'라고 안내한 경우에는 항상 false. "
+                    "주관적 인상으로는 절대 true로 하지 말 것"
     )
     feedback_summary: str = Field(
         description="판정 근거를 한 문장으로 요약. 근거가 된 아이템의 상품명을 반드시 포함"
@@ -290,8 +290,15 @@ class OutfitHarmonizer:
     # ------------------------------------------------------------------
     # Vision LLM 정밀 심사
     # ------------------------------------------------------------------
-    def evaluate_with_vision(self, items: list, tpo_context: Optional[str] = None) -> dict:
-        """gpt-4o-mini로 정밀 규칙 검증 수행 (TPO/색상/핏/격식도 4개 기준 심사)"""
+    def evaluate_with_vision(self, items: list, tpo_context: Optional[str] = None,
+                             is_formal: bool = False) -> dict:
+        """gpt-4o-mini로 정밀 규칙 검증 수행 (색상/핏/무드 채점 + 충돌 여부 표시)
+
+        is_formal이 False면 격식 심사 지침을 프롬프트에서 아예 빼 버린다.
+        '캐주얼하면 모자를 격식 위반으로 보지 말라'고 금지 문구를 넣어 두었어도
+        gpt-4o-mini는 여행 질의에 "모자가 있어 격식 있는 자리에 부적합하다"는 판정을
+        계속 내놓았다. 지키라고 말하는 것보다 판단 거리를 안 주는 쪽이 확실하다.
+        """
         valid_items = [it for it in items if it]
 
         image_contents = []
@@ -323,19 +330,36 @@ class OutfitHarmonizer:
         # (None이 그대로 렌더링되어 "착용 목적(None)과"가 되는 것을 방지)
         tpo_label = tpo_context.strip() if (tpo_context and tpo_context.strip()) else "미지정"
 
+        # 격식 심사 지침은 격식 자리일 때만 보낸다. 캐주얼 질의에는 '격식'이라는 단어
+        # 자체를 노출하지 않아야 엉뚱한 격식 판정이 섞여 들어오지 않는다.
+        if is_formal:
+            formality_axis = ", 격식도"
+            formality_rule = ("   - 착용 목적이 격식을 요구하는 자리입니다. 모자(볼캡/버킷햇/비니)나 "
+                              "샌들/슬리퍼/슬라이드가 [아이템 목록]에 실제로 있으면 formality_conflict를 true로 하세요." + chr(10) +
+                              "   - 해당 품목이 목록에 없으면 formality_conflict는 무조건 false입니다. "
+                              "'격식이 부족해 보인다', '신발이 캐주얼하다' 같은 주관적 인상으로 true로 만드는 것을 금지합니다. "
+                              "아쉬움은 mood_score를 낮추는 방식으로만 표현하세요." + chr(10) +
+                              "   - 셔츠, 슬랙스, 로퍼, 더비슈즈, 옥스포드화는 격식 자리에 적합한 아이템입니다. "
+                              "이들만으로 구성된 착장은 formality_conflict가 false입니다.")
+        else:
+            formality_axis = ""
+            formality_rule = ("   - 이 착장은 캐주얼한 상황용입니다. 모자, 샌들, 슬라이드, 스니커즈는 모두 정상적인 "
+                              "코디 아이템입니다." + chr(10) +
+                              "   - 격식 수준은 이번 심사 항목이 아닙니다. formality_conflict는 false로 두고, "
+                              "격식이나 예식장 적합성을 판정 사유나 feedback_summary에 쓰지 마세요.")
+
         # 1. 시스템 프롬프트: 역할 및 객관적 태도 지침 (충돌 원인 제거)
-        system_prompt = """당신은 의류 조합의 완성도를 객관적 기준에 따라 엄격하게 검증하는 전문 패션 디렉터입니다.
-무비판적인 칭찬이나 단순한 감상평을 배제하고, 유저 프롬프트에 제시된 세부 심사 기준(TPO, 색상 밸런스, 실루엣, 격식도)에 철저히 근거하여 판정하세요.
+        system_prompt = f"""당신은 의류 조합의 완성도를 객관적 기준에 따라 엄격하게 검증하는 전문 패션 디렉터입니다.
+무비판적인 칭찬이나 단순한 감상평을 배제하고, 유저 프롬프트에 제시된 세부 심사 기준(TPO, 색상 밸런스, 실루엣{formality_axis})에 철저히 근거하여 판정하세요.
 반드시 지정된 JSON 스키마로만 응답하세요."""
 
         # 2. 유저 프롬프트: 세부 채점표 및 조화도 점수 루브릭
         user_prompt_text = f"""[코디 세트 종합 조화도 검증 요청]
 제공된 이미지들을 직접 눈으로 확인하고 다음 핵심 기준에 맞춰 엄격히 판정하세요.
 
-1. TPO 및 계절/소재 적합성 ('tpo', 'season', 'formality')
+1. TPO 및 계절/소재 적합성 ('tpo', 'season')
    - 착용 목적({tpo_label})과 계절감에 부합하는지 확인하세요.
-   - [격식 자리인 경우에만 적용] 착용 목적이 결혼식, 장례식, 면접, 비즈니스처럼 격식을 요구하는 자리라면 모자(볼캡/버킷햇/비니)나 샌들이 포함되는 즉시 탈락('formality', 'tpo')입니다.
-   - [격식 자리가 아닌 경우] 착용 목적이 여행, 데일리, 캠퍼스, 휴양지, 운동처럼 캐주얼하다면 모자와 샌들은 정상적인 코디 아이템입니다. 이때 모자나 샌들이 포함된 것만을 근거로 'formality' 위반을 판정하는 것을 금지합니다.
+{formality_rule}
    - ★ 개별 아이템의 계절 적합성은 이미 검색 단계에서 보장되었습니다. 목록에 있는 아이템은 모두 이 계절에 착용 가능한 것으로 확정된 상태입니다. "이 아이템은 여름용/겨울용이라 부적합하다"는 식의 판정을 하지 마세요.
    - season_conflict는 상·하의의 두께감이 서로 명백히 충돌할 때만 true입니다. (예: 반팔 티셔츠 + 기모 바지) 그 외에는 false로 두세요.
 
@@ -347,12 +371,9 @@ class OutfitHarmonizer:
 3. 실루엣 및 핏 균형 ('fit')
    - 상·하의 핏 밸런스가 조화로운지 확인하세요. ([오버핏+와이드], [슬림+와이드], [레귤러+레귤러] 허용)
 
-4. 격식도 및 무드 통일감
+4. 무드 통일감
    - 아이템들의 분위기가 한 착장 안에서 심각하게 겉돌지 않는지는 mood_score로 반영하세요.
-   - ★ formality_conflict는 아래 한 가지 경우에만 true입니다.
-     [아이템 목록]에 모자(볼캡/버킷햇/비니) 또는 샌들/슬리퍼/슬라이드가 실제로 있고, 동시에 착용 목적이 결혼식·장례식·면접·비즈니스인 경우.
-   - 그 품목이 목록에 없으면 formality_conflict는 무조건 false입니다. "격식이 부족해 보인다", "신발이 캐주얼하다" 같은 주관적 인상으로 true로 만드는 것을 금지합니다. 격식 수준에 대한 아쉬움은 mood_score를 낮추는 방식으로만 표현하세요.
-   - 셔츠, 슬랙스, 로퍼, 더비슈즈, 옥스포드화는 격식 자리에 적합한 아이템입니다. 이들만으로 구성된 착장은 formality_conflict가 false입니다.
+   - 모자가 목록에 있다면, 그 모자가 착장에 보탬이 되는지를 mood_score에 반영하세요. 어색하다고 판단하면 그 판단을 글로만 쓰지 말고 반드시 mood_score를 낮추세요.
 
 [채점 지침]
 당신은 통과/탈락을 판정하지 않습니다. 아래 세 항목에 각각 0~100점을 매기고 충돌 여부만 표시하세요.
@@ -443,7 +464,8 @@ class OutfitHarmonizer:
                             slot_candidates: dict,
                             tpo_context: Optional[str] = None,
                             total_budget: Optional[int] = None,
-                            top_k: int = 2) -> list:
+                            top_k: int = 2,
+                            is_formal: bool = False) -> list:
         """
         [계층적 코디 선별 로직]
         1단계: 코어 의류(상의 + 하의 [+ 아우터])를 우선 조합하여 뼈대 구축 및 1차 검증
@@ -584,7 +606,8 @@ class OutfitHarmonizer:
         print(f">> [VLM 정밀 심사 시작] 총 {len(eval_pool)}개 조합 평가 중...")
         evaluated_outfits = []
         for idx, cand in enumerate(eval_pool, 1):
-            eval_res = self.evaluate_with_vision(cand["items"], tpo_context=tpo_context)
+            eval_res = self.evaluate_with_vision(cand["items"], tpo_context=tpo_context,
+                                                 is_formal=is_formal)
 
             # VLM 점수에 벡터 조화도를 섞어 동점을 해소한다.
             # 탈락 세트는 상한(FAIL_SCORE_CAP)을 유지해야 하므로 통과 세트만 혼합한다.
