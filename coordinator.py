@@ -7,6 +7,11 @@ from core.response_generator import ResponseGenerator
 
 # 전체 추천 파이프라인 중앙 제어기
 
+# 단품 검색은 한 슬롯만 보여주므로 후보를 넉넉히(최대 9개) 노출한다.
+# 코디 세트 검색은 슬롯 조합 수가 곱으로 늘어나므로 슬롯별 3개를 유지한다.
+SINGLE_SEARCH_TOP_K = 9
+
+
 class FashionPipelineCoordinator:
     def __init__(self):
         print(">> 패션 추천 파이프라인 컴포넌트 초기화 중...")
@@ -129,7 +134,7 @@ class FashionPipelineCoordinator:
                 color=slot.color,
                 season=detected_season,
                 max_price=effective_price,
-                top_k=3
+                top_k=SINGLE_SEARCH_TOP_K
             )
             comment = self.responder.generate_single_response(user_query, intent.tpo_summary, items)
             return {
