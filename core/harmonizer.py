@@ -6,6 +6,7 @@ from typing import List, Literal, Optional, Tuple
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from core.llm_settings import LLM_SEED
 
 # ==============================================================================
 # 3단계: 조화도 채점 & Vision LLM 규칙 검증기 (상의, 하의, 신발, 모자 통합 지원)
@@ -403,7 +404,9 @@ class OutfitHarmonizer:
                 model="gpt-4o-mini",
                 messages=messages,
                 response_format=OutfitEvaluation,
-                temperature=0.2
+                temperature=0.2,
+                # 같은 조합이 같은 점수를 받아야 수정 전후를 비교할 수 있다.
+                seed=LLM_SEED
             )
             parsed = res.choices[0].message.parsed
             if parsed is None:

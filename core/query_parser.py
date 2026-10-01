@@ -3,6 +3,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from dotenv import load_dotenv
+from core.llm_settings import LLM_SEED
 
 # ==============================================================================
 # 1단계: LLM 질의 분석기 & 가드레일 (의도 분류 및 슬롯 추출)
@@ -122,7 +123,9 @@ class QueryParser:
                 {"role": "user", "content": user_query}
             ],
             response_format=ParsedIntent,
-            temperature=0.0
+            temperature=0.0,
+            # 같은 질의가 같은 검색어를 만들어야 추천 결과를 비교할 수 있다.
+            seed=LLM_SEED
         )
         return completion.choices[0].message.parsed
 

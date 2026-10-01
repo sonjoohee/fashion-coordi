@@ -1,6 +1,7 @@
 import os
 from openai import OpenAI
 from dotenv import load_dotenv
+from core.llm_settings import LLM_SEED
 
 # ==============================================================================
 # 4단계: 객관적 근거 기반 자연어 응답 생성기 (순위별 분리 브리핑 적용)
@@ -60,7 +61,8 @@ class ResponseGenerator:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.2
+            temperature=0.2,
+            seed=LLM_SEED
         )
         return res.choices[0].message.content
 
@@ -97,6 +99,7 @@ class ResponseGenerator:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.2
+            temperature=0.2,
+            seed=LLM_SEED
         )
         return res.choices[0].message.content
