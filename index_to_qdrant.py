@@ -143,6 +143,48 @@ for i in tqdm(range(0, len(image_paths_to_embed), BATCH_SIZE), desc="Fashion-CLI
 # ==============================================================================
 # 6. Qdrant Payload 구축 및 업서트 (Upsert)
 # ==============================================================================
+
+# --- 계절(season) 확정 로직 ---------------------------------------------------
+# 원본 데이터의 season은 500건 중 411건만 채워져 있다(FW 272, SS 70, ALL 69, null 89).
+# null을 그대로 두면 계절 필터에서 통째로 빠지므로, subcategory와 상품명으로 보정한 뒤
+# 그래도 판별 불가한 것만 'ALL'(사계절)로 둔다. ALL은 모든 계절 검색에 포함된다.
+SS_SUBCATEGORIES = {
+    "short_sleeve_tshirt", "shorts", "slides", "clogs", "bucket_hat",
+}
+FW_SUBCATEGORIES = {
+    "heavy_puffer", "lightweight_puffer", "fleece", "beanie",
+    "knit_sweater", "hiking_shoes",
+}
+SS_NAME_HINTS = ("반팔", "숏슬리브", "쇼츠", "반바지", "샌들", "슬리퍼", "슬라이드",
+                 "뮬", "쪼리", "버킷", "썬햇", "린넨", "메쉬", "시어서커")
+FW_NAME_HINTS = ("패딩", "다운", "기모", "플리스", "비니", "니트", "이어플랩",
+                 "코트", "무스탕", "셰르파", "쉐르파", "양털", "터틀넥")
+
+
+def resolve_season(product: dict) -> str:
+    """상품의 계절을 'SS' / 'FW' / 'ALL' 중 하나로 확정한다.
+
+    우선순위: 원본 season > subcategory > 상품명 키워드 > ALL
+    """
+    raw = (product.get("season") or "").strip().upper()
+    if raw in ("SS", "FW", "ALL"):
+        return raw
+
+    subcategory = (product.get("subcategory") or "").strip()
+    if subcategory in SS_SUBCATEGORIES:
+        return "SS"
+    if subcategory in FW_SUBCATEGORIES:
+        return "FW"
+
+    name = product.get("product_name") or ""
+    if any(hint in name for hint in SS_NAME_HINTS):
+        return "SS"
+    if any(hint in name for hint in FW_NAME_HINTS):
+        return "FW"
+
+    return "ALL"
+
+
 points = []
 for idx, (p, img_path) in enumerate(valid_records):
     price_val = int(p.get("price") or p.get("sale_price") or 0)
@@ -154,6 +196,7 @@ for idx, (p, img_path) in enumerate(valid_records):
         "brand_name": p.get("brand_name", ""),
         "category": p.get("category") or p.get("source_category", ""),
         "subcategory": p.get("subcategory", ""),
+        "season": resolve_season(p),          # 'SS' / 'FW' / 'ALL' — 계절 필터의 근거
         "price": price_val,
         "color_normalized": p.get("color_normalized", []),
         "fit_normalized": p.get("fit_normalized", []),

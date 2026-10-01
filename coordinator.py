@@ -7,6 +7,11 @@ from core.response_generator import ResponseGenerator
 
 # 전체 추천 파이프라인 중앙 제어기
 
+# 단품 검색은 한 슬롯만 보여주므로 후보를 넉넉히(최대 9개) 노출한다.
+# 코디 세트 검색은 슬롯 조합 수가 곱으로 늘어나므로 슬롯별 3개를 유지한다.
+SINGLE_SEARCH_TOP_K = 9
+
+
 class FashionPipelineCoordinator:
     def __init__(self):
         print(">> 패션 추천 파이프라인 컴포넌트 초기화 중...")
@@ -116,6 +121,11 @@ class FashionPipelineCoordinator:
         # 포멀/격식 TPO 감지 (결혼식, 하객, 장례식, 면접, 출근, 비즈니스 등)
         is_formal = any(w in full_ctx for w in ["결혼", "하객", "장례", "조문", "면접", "출근", "비즈니스", "정장", "포멀"])
 
+        # 야외 활동 여부는 질의 파서가 판단한다. 모자는 야외일 때만 후보로 올린다.
+        # (키워드 목록으로 잡으면 '12월 캐나다 갈 건데'처럼 야외 단어가 없는 여행 질의를
+        #  실내로 오판한다. 장소 분류는 파서가 질의 전체를 보고 하는 편이 정확하다.)
+        is_outdoor = bool(getattr(intent, "is_outdoor", False))
+
         # [단품 검색 분기]
         if intent.search_type == "single":
             slot = intent.slots[0] if intent.slots else None
@@ -129,7 +139,7 @@ class FashionPipelineCoordinator:
                 color=slot.color,
                 season=detected_season,
                 max_price=effective_price,
-                top_k=3
+                top_k=SINGLE_SEARCH_TOP_K
             )
             comment = self.responder.generate_single_response(user_query, intent.tpo_summary, items)
             return {
@@ -164,6 +174,22 @@ class FashionPipelineCoordinator:
             if "bottom" not in slot_candidates:
                 slot_candidates["bottom"] = self._safe_search(f"{query_ctx} pants shorts trousers", category="bottom", season=detected_season, top_k=3)
 
+            # 쌀쌀한 계절(FW)이면 아우터를 반드시 채운다. 파서가 아우터 슬롯을 빼먹어도
+            # 가을·겨울 질의에 상의 한 장만 추천되는 일을 막는다.
+            # 검색어에 'padded'(패딩) 같은 한겨울 전용 단어를 박지 않고 query_ctx(TPO 요약)에
+            # 맡긴다. FW가 가을과 겨울을 한 덩어리로 묶고 있어, 단어를 박으면 10월 질의에
+            # 한겨울 패딩이 올라온다.
+            if detected_season == "FW" and not slot_candidates.get("outer"):
+                outer_query = f"{query_ctx} tailored blazer coat" if is_formal else f"{query_ctx} jacket coat outerwear"
+                outer_items = self._safe_search(
+                    query_text=outer_query,
+                    category="outer",
+                    season=detected_season,
+                    top_k=3
+                )
+                if outer_items:
+                    slot_candidates["outer"] = outer_items
+
             # 2) 신발 검색 (격식 TPO: 로퍼/구두 / 캐주얼 TPO: 계절별 키워드 분기)
             # 'sandals'를 계절 무관하게 넣으면 겨울 질의에도 슬라이드·샌들이 1순위로 올라온다.
             if is_formal:
@@ -175,17 +201,22 @@ class FashionPipelineCoordinator:
             else:
                 shoes_query = f"{query_ctx} sneakers shoes"
 
+            # 신발은 필수 착장이라 선택권을 주지 않는다. 예전에는 [None]을 앞에 붙여
+            # '신발 없음'도 후보로 뒀지만, 이제 후보가 있으면 반드시 착용한다.
+            # 후보가 0개면 슬롯 자체를 비워 두고 신발 없이 구성한다 (없으면 어쩔 수 없다).
             shoes_items = self._safe_search(
                 query_text=shoes_query,
                 category="shoes",
                 season=detected_season,
-                top_k=2
+                top_k=3
             )
-            slot_candidates["shoes"] = [None] + shoes_items
+            if shoes_items:
+                slot_candidates["shoes"] = shoes_items
 
-            # 3) 모자 검색 (격식 TPO: 모자 원천 배제([None]), 캐주얼 TPO: 모자 후보 추가)
-            if is_formal:
-                slot_candidates["headwear"] = [None]
+            # 3) 모자 검색 — 야외 상황에서만 후보로 올린다.
+            #    격식 자리(실내 예식 등)는 is_outdoor가 false라 자연히 제외되지만,
+            #    파서가 야외로 오판하는 경우를 막기 위해 is_formal도 함께 본다.
+            if is_formal or not is_outdoor:
                 headwear_count = 0
             else:
                 # 모자도 계절별로 키워드를 나눈다. 'bucket hat'은 여름 모자라서
@@ -203,17 +234,23 @@ class FashionPipelineCoordinator:
                     season=detected_season,
                     top_k=2
                 )
-                slot_candidates["headwear"] = [None] + headwear_items
-                headwear_count = len([h for h in headwear_items if h])
+                if headwear_items:
+                    slot_candidates["headwear"] = headwear_items
+                headwear_count = len(headwear_items)
 
-            print(f">> [후보군 수집] 상의: {len(slot_candidates.get('top', []))}개 | 하의: {len(slot_candidates.get('bottom', []))}개 | 신발: {len(shoes_items)}개 | 모자: {headwear_count}개 (포멀여부: {is_formal})")
+            print(f">> [후보군 수집] 아우터: {len(slot_candidates.get('outer', []))}개 | "
+                  f"상의: {len(slot_candidates.get('top', []))}개 | "
+                  f"하의: {len(slot_candidates.get('bottom', []))}개 | "
+                  f"신발(필수): {len(shoes_items)}개 | 모자(선택): {headwear_count}개 "
+                  f"(포멀: {is_formal} / 야외: {is_outdoor} / 계절: {detected_season or 'ALL'})")
 
             # [3단계] 조화도 채점 및 Vision Re-ranking (total_budget 반영)
             best_outfits = self.harmonizer.select_best_outfits(
                 slot_candidates=slot_candidates,
                 tpo_context=intent.tpo_summary,
                 total_budget=intent.total_budget,
-                top_k=2
+                top_k=2,
+                is_formal=is_formal
             )
 
             # [4단계] 자연어 응답 생성

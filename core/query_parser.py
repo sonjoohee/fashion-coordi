@@ -3,6 +3,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from dotenv import load_dotenv
+from core.llm_settings import LLM_SEED
 
 # ==============================================================================
 # 1단계: LLM 질의 분석기 & 가드레일 (의도 분류 및 슬롯 추출)
@@ -35,6 +36,11 @@ class ParsedIntent(BaseModel):
         description="질의의 시기, 월(month), 기온, 여행지 기후를 종합 판단한 계절 (여름/봄/더위/열대여행지: SS, 가을/겨울/추위/한파: FW, 무관/사계절: ALL 또는 null)"
     )
     total_budget: Optional[int] = Field(None, description="코디 세트 전체 총 예산")
+    # 🎯 모자 추천 여부를 가르는 판단. 모자는 야외 상황에서만 후보로 올린다.
+    is_outdoor: bool = Field(
+        False,
+        description="주된 활동 장소가 야외인지 여부 (여행, 등산, 캠핑, 바다, 해변, 산책, 러닝, 축제, 야외 행사, 날씨에 맞춘 외출 질의: true / 실내 위주 상황(결혼식, 면접, 사무실, 집, 카페, 식당): false)"
+    )
     slots: List[SlotQuery] = Field(default_factory=list, description="검색할 슬롯 리스트")
 
 class QueryParser:
@@ -86,6 +92,17 @@ class QueryParser:
 
         5. category 매핑: 반드시 ["outer", "top", "bottom", "shoes", "headwear"] 중 하나로 지정하세요.
 
+        5-1. is_outdoor 판단 규칙 (장소만 보고 사실 판단하세요. 옷이 어울리는지는 보지 마세요):
+           - true: 여행/출국, 등산, 캠핑, 바다/해변/휴양지, 산책, 러닝/조깅, 자전거, 피크닉, 축제/페스티벌,
+             놀이공원, 골프, 낚시, 스키/보드, 야외 행사, 그리고 "오늘 날씨에 맞는 옷"처럼 날씨를 근거로
+             외출 복장을 묻는 질의
+             * "12월 캐나다 갈 건데 옷 추천좀" -> true (해외 여행은 이동·관광으로 야외 시간이 길다)
+             * "오늘 날씨에 적합한 옷 추천해줘" -> true (날씨를 묻는 것은 외출을 전제한다)
+             * "8월에 입고 다닐 옷 추천해줘" -> true (일상 외출)
+           - false: 결혼식/장례식 등 실내 예식, 면접, 사무실 출근, 소개팅, 집/홈웨어, 카페, 식당, 실내 데이트
+             * "친한 친구 결혼식 깔끔한 하객룩 추천해줘" -> false (예식장 실내)
+           - 단품 검색(single)이나 패션 무관(unrelated) 질의에서는 false로 두세요.
+
         6. clip_query_en (한국어 패션 어휘 영문 정밀 매핑 - ★ 중요):
            - Fashion-CLIP 시각 인코더가 혼동하지 않도록 품목별 핵심 시각 특징과 배제 조건을 명확히 기재하세요.
            * **맨투맨/스웨트셔츠**: "crewneck sweatshirt, ribbed collar cuffs and hem, heavy cotton terry pullover, no hood, not a thin t-shirt"
@@ -106,7 +123,9 @@ class QueryParser:
                 {"role": "user", "content": user_query}
             ],
             response_format=ParsedIntent,
-            temperature=0.0
+            temperature=0.0,
+            # 같은 질의가 같은 검색어를 만들어야 추천 결과를 비교할 수 있다.
+            seed=LLM_SEED
         )
         return completion.choices[0].message.parsed
 
