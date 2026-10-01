@@ -68,6 +68,13 @@ SCORE_WEIGHTS = {"color": 0.5, "fit": 0.25, "mood": 0.25}
 PASS_SCORE_THRESHOLD = 60.0   # 이 점수 미만이면 착용 가능 수준이 아니라고 본다
 LOW_ITEM_SCORE = 40.0         # 항목 점수가 이 값 미만이면 해당 규칙 위반으로 기록
 
+# 최종 조화도는 VLM 평가에 시각 벡터 유사도를 소량 섞어 산출한다.
+# gpt-4o-mini가 항목 점수를 5의 배수로만 매기고 서로 다른 조합에 같은 세 값을
+# 반복해서(예: 색85/핏80/무드90이 10변형 연속) 종합 점수가 동점으로 뭉쳤다.
+# 벡터 유사도는 조합마다 다른 연속값이라 그 뭉침을 풀어준다.
+VLM_WEIGHT = 0.85
+VECTOR_WEIGHT = 0.15
+
 # 구버전 이름으로 import하는 모듈 호환용 별칭
 OutfitRuleVerification = OutfitEvaluation
 
@@ -524,6 +531,16 @@ class OutfitHarmonizer:
         for idx, cand in enumerate(eval_pool, 1):
             eval_res = self.evaluate_with_vision(cand["items"], tpo_context=tpo_context)
 
+            # VLM 점수에 벡터 조화도를 섞어 동점을 해소한다.
+            # 탈락 세트는 상한(FAIL_SCORE_CAP)을 유지해야 하므로 통과 세트만 혼합한다.
+            vlm_score = eval_res["harmony_score"]
+            if eval_res["pass_status"]:
+                blended = VLM_WEIGHT * vlm_score + VECTOR_WEIGHT * cand["vec_score"]
+                # 통과인데 표시 점수가 통과 기준 아래로 내려가는 모순을 막는다.
+                final_score = round(max(blended, PASS_SCORE_THRESHOLD), 1)
+            else:
+                final_score = vlm_score
+
             item_types = [it.get("category", "") for it in cand["items"]]
             worn = cand.get("worn_accessories") or []
             worn_label = f"잡화: {'+'.join(worn)}" if worn else "잡화 없음"
@@ -532,7 +549,8 @@ class OutfitHarmonizer:
             score_detail = (f" (색{scores['color']}/핏{scores['fit']}/무드{scores['mood']})"
                             if scores else "")
             print(f"   [{idx}번 변형] ({' + '.join(item_types)} | {worn_label} | {cand['total_price']:,}원) "
-                  f"{status_badge} | {eval_res['harmony_score']}점{score_detail} | {eval_res['feedback_summary']}")
+                  f"{status_badge} | {final_score}점{score_detail} "
+                  f"[VLM {vlm_score} / 벡터 {cand['vec_score']}] | {eval_res['feedback_summary']}")
 
             status_text = "[규칙 통과]" if eval_res["pass_status"] else "[규칙 위반]"
             verdict_text = f"{status_text} {eval_res['feedback_summary']}"
@@ -552,8 +570,10 @@ class OutfitHarmonizer:
                 "feedback_summary": eval_res["feedback_summary"],
                 "verdict": verdict_text,
                 "styling_tip": styling_tip_text,
-                # 점수 클램프는 evaluate_with_vision에서 이미 완료 (중복 가드레일 제거)
-                "harmony_score": eval_res["harmony_score"],
+                # VLM 점수와 벡터 점수를 섞은 최종값. 원본 두 값도 함께 남겨 추적 가능하게 한다.
+                "harmony_score": final_score,
+                "vlm_score": vlm_score,
+                "item_scores": eval_res.get("item_scores"),
                 "evaluated_by": eval_res["evaluated_by"],
                 "total_price": cand["total_price"],
                 "budget_note": budget_note,
