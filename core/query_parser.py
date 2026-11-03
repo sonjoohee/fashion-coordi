@@ -12,6 +12,10 @@ from core.llm_settings import LLM_SEED
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# openai 패키지 버전에 따라 구조화 출력 호출 위치가 다르다.
+# 최신 버전은 client.chat.completions.parse, 예전 버전은 client.beta.chat.completions.parse에 있다.
+_structured_parse = getattr(client.chat.completions, "parse", None) or client.beta.chat.completions.parse
+
 # 1. 단품 슬롯 스키마 정의
 class SlotQuery(BaseModel):
     slot_name: str = Field(description="슬롯명: outer, top, bottom, shoes, headwear 중 하나")
@@ -121,7 +125,7 @@ class QueryParser:
 
         system_prompt = build_system_prompt(current_month)
 
-        completion = client.beta.chat.completions.parse(
+        completion = _structured_parse(
             model=self.model_name,
             messages=[
                 {"role": "system", "content": system_prompt},
