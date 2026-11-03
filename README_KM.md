@@ -45,3 +45,29 @@ fitzza_poc/
 ├── index_to_qdrant.py         # 500개 상품 이미지 Fashion-CLIP 임베딩 및 Qdrant 적재
 ├── test_search.py             # 단품 및 조합 검색 기능/지연 시간 검증 단위 테스트
 └── README.md                  # 프로젝트 안내 및 가이드 문서
+
+---
+
+## 질의 분석기 LangChain 버전 (`core/query_parser_lc.py`)
+
+1단계 질의 분석기를 LangChain(`langchain-openai`)으로 옮긴 버전입니다. 기존 OpenAI SDK 버전(`core/query_parser.py`)은 그대로 두고, 환경 변수로 골라 씁니다.
+
+| | OpenAI SDK 버전 | LangChain 버전 |
+| --- | --- | --- |
+| 파일 | `core/query_parser.py` | `core/query_parser_lc.py` |
+| 호출 | `client.beta.chat.completions.parse` | `ChatOpenAI(...).with_structured_output(ParsedIntent, method="json_schema")` |
+| 프롬프트 | `build_system_prompt()` | `build_system_prompt()` (같은 함수) |
+| 출력 스키마 | `ParsedIntent` | `ParsedIntent` (같은 클래스) |
+| 모델 설정 | gpt-4o-mini, temperature 0, seed 고정 | 같음 |
+
+프롬프트와 스키마, 모델 설정을 똑같이 맞춰 두었기 때문에 결과가 다르면 프레임워크 차이로 볼 수 있습니다.
+
+```bash
+pip install langchain-openai
+
+# 두 분석기를 같은 질의 9종으로 비교 (Qdrant 없이 실행 가능)
+python compare_parsers.py
+
+# 전체 파이프라인을 LangChain 분석기로 실행
+QUERY_PARSER=langchain python test_search.py
+```

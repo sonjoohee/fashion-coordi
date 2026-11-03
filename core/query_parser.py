@@ -43,15 +43,9 @@ class ParsedIntent(BaseModel):
     )
     slots: List[SlotQuery] = Field(default_factory=list, description="검색할 슬롯 리스트")
 
-class QueryParser:
-    def __init__(self, model_name="gpt-4o-mini"):
-        self.model_name = model_name
-
-    def parse(self, user_query: str) -> ParsedIntent:
-        from datetime import datetime
-        current_month = datetime.now().month  # 현재 실제 월 확인
-
-        system_prompt = f"""
+def build_system_prompt(current_month: int) -> str:
+    """질의 분석 시스템 프롬프트. OpenAI SDK 버전과 LangChain 버전이 같은 문장을 쓰도록 한 곳에 둔다."""
+    return f"""
         당신은 패션 커머스 플랫폼의 수석 AI 스타일리스트이자 쿼리 분석기입니다.
         (참고: 현재 실제 날짜는 {current_month}월입니다. '오늘' 또는 '요즘' 질의 시 이를 반영하세요.)
 
@@ -116,6 +110,17 @@ class QueryParser:
            * **기타 품목**: 핏(오버핏, 와이드핏 등)과 원단 소재 디테일을 구체적 영문 형용사로 작성하세요.
         """
 
+
+class QueryParser:
+    def __init__(self, model_name="gpt-4o-mini"):
+        self.model_name = model_name
+
+    def parse(self, user_query: str) -> ParsedIntent:
+        from datetime import datetime
+        current_month = datetime.now().month  # 현재 실제 월 확인
+
+        system_prompt = build_system_prompt(current_month)
+
         completion = client.beta.chat.completions.parse(
             model=self.model_name,
             messages=[
@@ -126,16 +131,5 @@ class QueryParser:
             temperature=0.0,
             # 같은 질의가 같은 검색어를 만들어야 추천 결과를 비교할 수 있다.
             seed=LLM_SEED
-        )
-        return completion.choices[0].message.parsed
-
-        completion = client.beta.chat.completions.parse(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_query}
-            ],
-            response_format=ParsedIntent,
-            temperature=0.0
         )
         return completion.choices[0].message.parsed

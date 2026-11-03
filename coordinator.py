@@ -15,11 +15,26 @@ SINGLE_SEARCH_TOP_K = 9
 class FashionPipelineCoordinator:
     def __init__(self):
         print(">> 패션 추천 파이프라인 컴포넌트 초기화 중...")
-        self.parser = QueryParser()
+        self.parser = self._build_parser()
         self.engine = FashionSearchEngine()
         self.harmonizer = OutfitHarmonizer(self.engine)
         self.responder = ResponseGenerator()
         print(">> 전체 파이프라인 준비 완료.")
+
+    @staticmethod
+    def _build_parser():
+        """1단계 질의 분석기 선택. QUERY_PARSER=langchain이면 LangChain 버전을 쓴다.
+
+        기본값은 기존 OpenAI SDK 버전이다. LangChain 버전은 langchain-openai가
+        설치된 환경에서만 불러오도록 import를 함수 안에 둔다.
+        """
+        backend = os.getenv("QUERY_PARSER", "openai").lower()
+        if backend == "langchain":
+            from core.query_parser_lc import LangChainQueryParser
+            print(">> 질의 분석기: LangChain")
+            return LangChainQueryParser()
+        print(">> 질의 분석기: OpenAI SDK")
+        return QueryParser()
 
     def _is_foreign_query(self, text: str) -> bool:
         """한글이 한 글자도 포함되어 있지 않고 영문 알파벳이 포함된 경우 외국어 질의로 판별"""
