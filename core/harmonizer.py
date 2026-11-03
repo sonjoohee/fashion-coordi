@@ -14,6 +14,7 @@ from core.llm_settings import LLM_SEED
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_structured_parse = getattr(client.chat.completions, "parse", None) or client.beta.chat.completions.parse
 
 # --- 튜닝 상수 -----------------------------------------------------------------
 FAIL_SCORE_CAP = 45.0       # 규칙 위반 세트의 점수 상한
@@ -400,7 +401,7 @@ class OutfitHarmonizer:
         ]
 
         try:
-            res = client.beta.chat.completions.parse(
+            res = _structured_parse(
                 model="gpt-4o-mini",
                 messages=messages,
                 response_format=OutfitEvaluation,
